@@ -25,6 +25,9 @@ parakeet = [
 ]
 test = [
     "psutil>=7.0.0",
+    "pytest>=8.3.0",
+    "datasets>=3.0.0",
+    "sacrebleu>=2.4.0",
 ]
 
 [tool.uv]

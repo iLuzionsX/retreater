@@ -15,9 +15,26 @@ fi
 pkill -x "$APP_NAME" >/dev/null 2>&1 || true
 
 cd "$PACKAGE_DIR"
-swift build -c debug
+# Command Line Tools ship Swift but not the SwiftUI macro plugin. Prefer a
+# local Xcode/Xcode-beta plugin directory when the CLT toolchain cannot see it.
+SWIFT_BUILD_ARGS=(-c debug)
+PLUGIN_DIR=""
+for candidate in \
+  "/Applications/Xcode.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" \
+  "/Applications/Xcode-beta.app/Contents/Developer/Platforms/MacOSX.platform/Developer/usr/lib/swift/host/plugins" \
+  "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins"
+do
+  if [[ -f "$candidate/libSwiftUIMacros.dylib" ]]; then
+    PLUGIN_DIR="$candidate"
+    break
+  fi
+done
+if [[ -n "$PLUGIN_DIR" && ! -f "/Library/Developer/CommandLineTools/usr/lib/swift/host/plugins/libSwiftUIMacros.dylib" ]]; then
+  SWIFT_BUILD_ARGS+=(-Xswiftc -plugin-path -Xswiftc "$PLUGIN_DIR")
+fi
+swift build "${SWIFT_BUILD_ARGS[@]}"
 
-EXECUTABLE="$(swift build -c debug --show-bin-path)/$APP_NAME"
+EXECUTABLE="$(swift build "${SWIFT_BUILD_ARGS[@]}" --show-bin-path)/$APP_NAME"
 
 rm -rf "$BUNDLE"
 mkdir -p "$BUNDLE/Contents/MacOS" "$BUNDLE/Contents/Resources"
@@ -50,7 +67,9 @@ PLIST
 
 "$ROOT/script/package_engine.sh" "$BUNDLE"
 
-/usr/bin/open -n "$BUNDLE"
+if [[ "${SKIP_OPEN:-}" != "1" ]]; then
+  /usr/bin/open -n "$BUNDLE"
+fi
 
 if [[ "$verify" == true ]]; then
   sleep 2
