@@ -1,0 +1,57 @@
+{
+  "set": "google/fleurs test, en_us audio with es_419 text, matched on id",
+  "limit": 6,
+  "bleu": 16.3580141986775,
+  "chrf": 51.3015321115377,
+  "median_seconds": 3.3883233124943217,
+  "rows": [
+    {
+      "id": "1980",
+      "english": "Unfortunately, studying traffic flow is difficult because driver behavior cannot be predicted with one-hundred percent certainty.",
+      "reference": "Lamentablemente, no es tarea sencilla estudiar el flujo del tráfico, ya que es no es posible hacer predicciones exactas sobre el comportamiento de los conductores.",
+      "hypothesis_original": "Unfortunately, studying traffic flow is difficult because driver behavior cannot be predicted with 100% certainty.",
+      "hypothesis": "Lamentablemente, estudiar el flujo de tráfico es difícil porque el comportamiento de los conductores no se puede predecir con 100% de certeza.",
+      "seconds": 3.60415104200365
+    },
+    {
+      "id": "1914",
+      "english": "Twentieth century research has shown that there are two pools of genetic variation: hidden and expressed.",
+      "reference": "A través de los trabajos de investigación del siglo XX se ha demostrado que existen dos grupos de variación genética: la oculta y la manifiesta.",
+      "hypothesis_original": "20th-century research has shown that there are two pools of genetic variation, hidden and expressed.",
+      "hypothesis": "Las investigaciones del siglo XX han demostrado que hay dos grupos de variación genética, escondidos y expresados.",
+      "seconds": 3.1724955829849932
+    },
+    {
+      "id": "1771",
+      "english": "Remember that even though music on the main stages may have finished, there may be sections of the festival that will keep playing music until late into the night.",
+      "reference": "Hay que tener en cuenta que, si bien las actuaciones musicales puede que hayan finalizado, en otras zonas del festival podrían continuar hasta altas horas de la madrugada.",
+      "hypothesis_original": "Remember that even though music on the main stages may have finished, there may be sections of the festival that will keep playing music until late into the night.",
+      "hypothesis": "Recuerden que aunque la música en los escenarios principales puede haber terminado, puede haber secciones del festival que sigan poniendo música hasta altas horas de la noche.",
+      "seconds": 4.490112541010603
+    },
+    {
+      "id": "1669",
+      "english": "Police superintendent Chandra Shekhar Solanki said the accused appeared in court with covered faces.",
+      "reference": "Según manifestara el superintendente de la policía, Chandra Shekhar Solanki, los acusados se presentaron ante el tribunal con sus rostros cubiertos.",
+      "hypothesis_original": "Police superintendent Chandra Shekhar Solanki said that accused appeared in court with covered faces.",
+      "hypothesis": "El superintendente de policía Chandra Shekhar Solanki dijo que los acusados aparecieron en el tribunal con rostros cubiertos.",
+      "seconds": 3.0869651659741066
+    },
+    {
+      "id": "1949",
+      "english": "The term bug is used by entomologists in a formal sense for this group of insects.",
+      "reference": "Los entomólogos emplean el término insecto parásito en un sentido formal para referirse a este grupo de artrópodos.",
+      "hypothesis_original": "The term bug is used by entomologists in a formal sense for this group of insects.",
+      "hypothesis": "El término \"insecto\" es usado por los entomólogos en un sentido formal para este grupo de insectos.",
+      "seconds": 2.917148750013439
+    },
+    {
+      "id": "1832",
+      "english": "Popular sports include football, basketball, volleyball, water-polo, fencing, rugby, cycling, ice hockey, roller hockey and F1 motor racing.",
+      "reference": "Entre los deportes que más se practican están el fútbol, el baloncesto, el voleibol, el waterpolo, la esgrima, el rugby, el ciclismo, el jóquey sobre hielo, el jóquey sobre patines y las carreras d Fórmula 1.",
+      "hypothesis_original": "Other sports include football, basketball, volleyball, water polo, fencing, rugby, cycling, ice hockey, roller hockey and F1 motor racing.",
+      "hypothesis": "Otros deportes incluyen fútbol, baloncesto, voleibol, waterpolo, esgrima, rugby, ciclismo, hockey sobre hielo, hockey en línea y carreras de motor F1.",
+      "seconds": 4.481438624992734
+    }
+  ]
+}

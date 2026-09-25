@@ -1,0 +1,813 @@
+from __future__ import annotations
+
+import asyncio
+import itertools
+import multiprocessing as mp
+import os
+import queue
+import tempfile
+import time
+import traceback
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Awaitable, Callable, Literal
+
+import numpy as np
+import soundfile as sf
+from dotenv import load_dotenv
+
+from prompts import (
+    CAPTION_SAMPLING,
+    SamplingConfig,
+    build_asr_correction_prompt,
+    build_ast_prompt,
+    build_polish_prompt,
+    build_translate_prompt,
+    parse_ast_output,
+)
+
+load_dotenv()
+
+MODEL_PATH = os.getenv("MODEL_PATH", "mlx-community/gemma-4-e4b-it-8bit")
+TEMP_WAV_ROOT = Path(
+    os.getenv("LIVETR3_TEMP_WAV_ROOT", os.path.join(tempfile.gettempdir(), "livetr3-mlx"))
+)
+TEMP_WAV_STALE_SECONDS = max(60, int(os.getenv("TEMP_WAV_STALE_SECONDS", "1800")))
+TEMP_WAV_SWEEP_INTERVAL_SECONDS = max(
+    30, int(os.getenv("TEMP_WAV_SWEEP_INTERVAL_SECONDS", "300"))
+)
+PARTIAL_TIMEOUT_SECONDS = max(1.0, float(os.getenv("PARTIAL_TIMEOUT_SECONDS", "8")))
+FINAL_TIMEOUT_SECONDS = max(1.0, float(os.getenv("FINAL_TIMEOUT_SECONDS", "15")))
+POLISH_TIMEOUT_SECONDS = max(1.0, float(os.getenv("POLISH_TIMEOUT_SECONDS", "10")))
+TRANSLATE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("TRANSLATE_TIMEOUT_SECONDS", "12")))
+MAINTENANCE_TIMEOUT_SECONDS = max(1.0, float(os.getenv("MAINTENANCE_TIMEOUT_SECONDS", "5")))
+MLX_WORKER_START_TIMEOUT_SECONDS = max(
+    10.0, float(os.getenv("MLX_WORKER_START_TIMEOUT_SECONDS", "180"))
+)
+MLX_WORKER_RECOVERY_BACKOFF_SECONDS = max(
+    0.0, float(os.getenv("MLX_WORKER_RECOVERY_BACKOFF_SECONDS", "2"))
+)
+
+class MLXWorker:
+    def __init__(self, temp_wav_root: Path | None = None) -> None:
+        from mlx_vlm import load
+
+        self._temp_wav_root = temp_wav_root or TEMP_WAV_ROOT
+        self._temp_wav_root.mkdir(parents=True, exist_ok=True)
+        sweep_stale_temp_wavs(self._temp_wav_root, TEMP_WAV_STALE_SECONDS)
+        self.model, self.processor = load(MODEL_PATH)
+        self.config = self.model.config
+        self._prompt_cache_state = None
+        self._wav_path = self._temp_wav_root / "ast-live.wav"
+        self._warmup()
+
+    def _warmup(self) -> None:
+        silent = np.zeros(16_000, dtype=np.float32)
+        self.ast(silent, "English", "Spanish", prior_context=[])
+
+    def ast(
+        self,
+        audio_f32_16k: np.ndarray,
+        src: str,
+        tgt: str,
+        prior_context: list[tuple[str, str]],
+        custom_vocab: list[str] | None = None,
+        code_switching_enabled: bool = False,
+        max_tokens: int = 256,
+        on_text: Callable[[str], None] | None = None,
+    ) -> tuple[str, str]:
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        audio_f32_16k = np.asarray(audio_f32_16k, dtype=np.float32).reshape(-1)
+        if audio_f32_16k.shape[0] > 25 * 16_000:
+            audio_f32_16k = audio_f32_16k[: 25 * 16_000]
+
+        wav_path = self._wav_path
+        try:
+            sf.write(wav_path, audio_f32_16k, 16_000, subtype="FLOAT")
+            prompt_text = build_ast_prompt(
+                src,
+                tgt,
+                prior_context=prior_context,
+                custom_vocab=custom_vocab,
+                code_switching_enabled=code_switching_enabled,
+            )
+            # mlx-vlm expands num_audios before the prompt text; do not hand-roll templates.
+            formatted = apply_chat_template(
+                self.processor,
+                self.config,
+                prompt_text,
+                num_audios=1,
+            )
+            out = self._generate(
+                formatted,
+                audio=[str(wav_path)],
+                max_tokens=max_tokens,
+                sampling=CAPTION_SAMPLING,
+                on_text=on_text,
+            )
+            return parse_ast_output(out, tgt)
+        finally:
+            _safe_unlink(wav_path)
+
+    def polish(self, text: str, max_tokens: int = 256) -> str:
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        prompt = build_polish_prompt(text)
+        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
+        return self._generate(
+            formatted,
+            max_tokens=max_tokens,
+            sampling=CAPTION_SAMPLING,
+        ).strip()
+
+    def translate_text(
+        self,
+        text: str,
+        src: str,
+        tgt: str,
+        max_tokens: int = 256,
+        bilingual_context: list[tuple[str, str]] | None = None,
+    ) -> str:
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        prompt = build_translate_prompt(
+            text,
+            src,
+            tgt,
+            bilingual_context=bilingual_context,
+        )
+        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
+        return self._generate(
+            formatted,
+            max_tokens=max_tokens,
+            sampling=CAPTION_SAMPLING,
+        ).strip()
+
+    def correct_asr_text(
+        self,
+        text: str,
+        src: str,
+        custom_vocab: list[str] | None = None,
+        prior_context: list[tuple[str, str]] | None = None,
+        learned_corrections: list[tuple[str, str]] | None = None,
+        code_switching_enabled: bool = False,
+        max_tokens: int = 192,
+    ) -> str:
+        from mlx_vlm.prompt_utils import apply_chat_template
+
+        prompt = build_asr_correction_prompt(
+            text,
+            src,
+            custom_vocab=custom_vocab,
+            prior_context=prior_context,
+            learned_corrections=learned_corrections,
+            code_switching_enabled=code_switching_enabled,
+        )
+        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
+        return self._generate(
+            formatted,
+            max_tokens=max_tokens,
+            sampling=CAPTION_SAMPLING,
+        ).strip()
+
+    def clear_caches(self) -> None:
+        import gc
+
+        self._prompt_cache_state = None
+        gc.collect()
+        try:
+            import mlx.core as mx
+
+            mx.metal.clear_cache()
+        except Exception:
+            return
+
+    def _generate(
+        self,
+        formatted: str,
+        *,
+        max_tokens: int,
+        sampling: SamplingConfig,
+        audio: list[str] | None = None,
+        on_text: Callable[[str], None] | None = None,
+    ) -> str:
+        from mlx_vlm.generate import PromptCacheState
+
+        # A reused KV cache keys on the text prefix. The AST prompt text is stable, so
+        # the next clip would keep the previous utterance's audio and repeat it.
+        self._prompt_cache_state = PromptCacheState()
+        sampling_kwargs = {
+            "audio": audio,
+            "max_tokens": max_tokens,
+            "temperature": sampling.temperature,
+            "top_p": sampling.top_p,
+            "top_k": sampling.top_k,
+            "verbose": False,
+            "prompt_cache_state": self._prompt_cache_state,
+        }
+        if on_text is None:
+            from mlx_vlm import generate
+
+            return _generation_text(generate(self.model, self.processor, formatted, **sampling_kwargs))
+
+        from mlx_vlm import stream_generate
+
+        full = ""
+        for response in stream_generate(self.model, self.processor, formatted, **sampling_kwargs):
+            piece = response.text or ""
+            if not piece or full.endswith(piece):
+                continue
+            full += piece
+            on_text(full)
+        return full
+
+
+def _generation_text(result: object) -> str:
+    if isinstance(result, str):
+        return result
+    text = getattr(result, "text", None)
+    if isinstance(text, str):
+        return text
+    return str(result)
+
+
+def _translation_max_tokens(text: str, priority: Literal["partial", "final"]) -> int:
+    word_count = len(text.split())
+    buffer = 18 if priority == "partial" else 28
+    minimum = 32 if priority == "partial" else 48
+    maximum = 96 if priority == "partial" else 160
+    return min(maximum, max(minimum, word_count * 3 + buffer))
+
+
+class InferenceTimeoutError(RuntimeError):
+    pass
+
+
+class WorkerProcessError(RuntimeError):
+    pass
+
+
+@dataclass(slots=True, frozen=True)
+class WorkerStatusEvent:
+    state: Literal["starting", "ready", "recovering", "failed"]
+    message: str
+
+
+@dataclass(order=True)
+class _QueuedJob:
+    priority: int
+    sequence: int
+    kind: Literal["ast", "polish", "translate", "correct", "maintenance"] = field(compare=False)
+    future: asyncio.Future = field(compare=False)
+    payload: dict = field(compare=False)
+    on_delta: Callable[[str], None] | None = field(compare=False, default=None)
+
+
+class MLXWorkerService:
+    """Async facade around one synchronous MLXWorker and one Metal context."""
+
+    def __init__(self) -> None:
+        self._queue: asyncio.PriorityQueue[_QueuedJob] = asyncio.PriorityQueue()
+        self._sequence = itertools.count()
+        self._runner: asyncio.Task | None = None
+        self._sweeper: asyncio.Task | None = None
+        self._start_lock = asyncio.Lock()
+        self._started = False
+        self._closed = asyncio.Event()
+        self._temp_wav_root = TEMP_WAV_ROOT
+        self._process: mp.Process | None = None
+        self._request_queue: mp.Queue | None = None
+        self._response_queue: mp.Queue | None = None
+        self._active_job_kind: Literal["ast", "polish", "translate", "correct", "maintenance"] | None = None
+        self._queued_partial_jobs: dict[int, _QueuedJob] = {}
+        self._queued_partial_translation_jobs: dict[int, _QueuedJob] = {}
+        self._final_utterance_ids: set[int] = set()
+        self._mp_context = mp.get_context("spawn")
+        self._status = WorkerStatusEvent(state="starting", message="Loading Gemma model worker")
+        self._status_listeners: set[Callable[[WorkerStatusEvent], Awaitable[None]]] = set()
+
+    async def start(self) -> None:
+        async with self._start_lock:
+            if self._started:
+                return
+            self._closed.clear()
+            self._temp_wav_root.mkdir(parents=True, exist_ok=True)
+            await asyncio.to_thread(
+                sweep_stale_temp_wavs, self._temp_wav_root, TEMP_WAV_STALE_SECONDS
+            )
+            try:
+                await self._start_worker_process()
+            except Exception as exc:
+                await self._emit_status(
+                    WorkerStatusEvent(state="failed", message=f"Model worker failed to start: {exc}")
+                )
+                raise
+            self._runner = asyncio.create_task(self._run(), name="mlx-worker-queue")
+            self._sweeper = asyncio.create_task(
+                self._run_temp_wav_sweeper(), name="mlx-temp-wav-sweeper"
+            )
+            self._started = True
+
+    async def stop(self) -> None:
+        self._closed.set()
+        if self._sweeper:
+            self._sweeper.cancel()
+            try:
+                await self._sweeper
+            except asyncio.CancelledError:
+                pass
+        if self._runner:
+            self._runner.cancel()
+            try:
+                await self._runner
+            except asyncio.CancelledError:
+                pass
+        await self._stop_worker_process(force=True)
+        await asyncio.to_thread(sweep_stale_temp_wavs, self._temp_wav_root, 0)
+        self._started = False
+
+    async def submit_ast(
+        self,
+        *,
+        priority: Literal["partial", "final"],
+        utterance_id: int | None,
+        audio_f32_16k: np.ndarray,
+        src: str,
+        tgt: str,
+        prior_context: list[tuple[str, str]],
+        custom_vocab: list[str],
+        code_switching_enabled: bool,
+        max_tokens: int,
+        on_delta: Callable[[str], None] | None = None,
+    ) -> tuple[str, str] | None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        job = _QueuedJob(
+            priority=1 if priority == "partial" else 0,
+            sequence=next(self._sequence),
+            kind="ast",
+            future=future,
+            payload={
+                "priority": priority,
+                "utterance_id": utterance_id,
+                "audio_f32_16k": audio_f32_16k,
+                "src": src,
+                "tgt": tgt,
+                "prior_context": prior_context,
+                "custom_vocab": custom_vocab,
+                "code_switching_enabled": code_switching_enabled,
+                "max_tokens": max_tokens,
+            },
+            on_delta=on_delta,
+        )
+        if utterance_id is not None:
+            previous = self._queued_partial_jobs.get(utterance_id)
+            if priority == "partial":
+                if utterance_id in self._final_utterance_ids:
+                    future.set_result(None)
+                    return await future
+                if previous is not None and not previous.future.done():
+                    previous.future.set_result(None)
+                self._queued_partial_jobs[utterance_id] = job
+            else:
+                self._final_utterance_ids.add(utterance_id)
+                if previous is not None:
+                    self._queued_partial_jobs.pop(utterance_id, None)
+                    if not previous.future.done():
+                        previous.future.set_result(None)
+        await self._queue.put(job)
+        return await future
+
+    async def submit_polish(self, text: str) -> str:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        await self._queue.put(
+            _QueuedJob(
+                priority=20,
+                sequence=next(self._sequence),
+                kind="polish",
+                future=future,
+                payload={"text": text},
+            )
+        )
+        return await future
+
+    async def submit_translate_text(
+        self,
+        text: str,
+        src: str,
+        tgt: str,
+        *,
+        priority: Literal["partial", "final"] = "final",
+        utterance_id: int | None = None,
+        bilingual_context: list[tuple[str, str]] | None = None,
+    ) -> str | None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        job = _QueuedJob(
+            priority=5 if priority == "final" else 3,
+            sequence=next(self._sequence),
+            kind="translate",
+            future=future,
+            payload={
+                "priority": priority,
+                "utterance_id": utterance_id,
+                "text": text,
+                "src": src,
+                "tgt": tgt,
+                "max_tokens": _translation_max_tokens(text, priority),
+                "bilingual_context": bilingual_context or [],
+            },
+        )
+        if utterance_id is not None:
+            previous = self._queued_partial_translation_jobs.get(utterance_id)
+            if priority == "partial":
+                if utterance_id in self._final_utterance_ids:
+                    future.set_result(None)
+                    return await future
+                if previous is not None and not previous.future.done():
+                    previous.future.set_result(None)
+                self._queued_partial_translation_jobs[utterance_id] = job
+            else:
+                self._final_utterance_ids.add(utterance_id)
+                if previous is not None:
+                    self._queued_partial_translation_jobs.pop(utterance_id, None)
+                    if not previous.future.done():
+                        previous.future.set_result(None)
+        await self._queue.put(job)
+        return await future
+
+    async def submit_correct_asr_text(
+        self,
+        text: str,
+        src: str,
+        *,
+        custom_vocab: list[str] | None = None,
+        prior_context: list[tuple[str, str]] | None = None,
+        learned_corrections: list[tuple[str, str]] | None = None,
+        code_switching_enabled: bool = False,
+    ) -> str:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        await self._queue.put(
+            _QueuedJob(
+                priority=4,
+                sequence=next(self._sequence),
+                kind="correct",
+                future=future,
+                payload={
+                    "text": text,
+                    "src": src,
+                    "custom_vocab": custom_vocab or [],
+                    "prior_context": prior_context or [],
+                    "learned_corrections": learned_corrections or [],
+                    "code_switching_enabled": code_switching_enabled,
+                },
+            )
+        )
+        return await future
+
+    async def submit_maintenance(self) -> None:
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
+        await self._queue.put(
+            _QueuedJob(
+                priority=30,
+                sequence=next(self._sequence),
+                kind="maintenance",
+                future=future,
+                payload={},
+            )
+        )
+        await future
+
+    async def add_status_listener(
+        self, listener: Callable[[WorkerStatusEvent], Awaitable[None]]
+    ) -> None:
+        self._status_listeners.add(listener)
+        await listener(self._status)
+
+    def remove_status_listener(
+        self, listener: Callable[[WorkerStatusEvent], Awaitable[None]]
+    ) -> None:
+        self._status_listeners.discard(listener)
+
+    @property
+    def is_busy_or_backlogged(self) -> bool:
+        return self._active_job_kind is not None or self._queue.qsize() > 0
+
+    async def _run(self) -> None:
+        while not self._closed.is_set():
+            job = await self._queue.get()
+            try:
+                if job.future.done():
+                    continue
+                if self._should_skip_job(job):
+                    if not job.future.done():
+                        job.future.set_result(None)
+                    continue
+                self._active_job_kind = job.kind
+                result = await self._execute_job(job)
+                if not job.future.cancelled():
+                    job.future.set_result(result)
+            except Exception as exc:
+                if not job.future.cancelled():
+                    job.future.set_exception(exc)
+            finally:
+                self._active_job_kind = None
+                self._queue.task_done()
+
+    def _should_skip_job(self, job: _QueuedJob) -> bool:
+        if job.payload.get("priority") != "partial":
+            return False
+        utterance_id = job.payload.get("utterance_id")
+        if not isinstance(utterance_id, int):
+            return False
+        if utterance_id in self._final_utterance_ids:
+            return True
+        if job.kind == "ast":
+            queued_job = self._queued_partial_jobs.get(utterance_id)
+            queued_jobs = self._queued_partial_jobs
+        elif job.kind == "translate":
+            queued_job = self._queued_partial_translation_jobs.get(utterance_id)
+            queued_jobs = self._queued_partial_translation_jobs
+        else:
+            return False
+        if queued_job is None:
+            return False
+        if queued_job.sequence != job.sequence:
+            return True
+        queued_jobs.pop(utterance_id, None)
+        return False
+
+    async def _run_temp_wav_sweeper(self) -> None:
+        while not self._closed.is_set():
+            await asyncio.to_thread(
+                sweep_stale_temp_wavs,
+                self._temp_wav_root,
+                TEMP_WAV_STALE_SECONDS,
+            )
+            try:
+                await asyncio.wait_for(
+                    self._closed.wait(),
+                    timeout=TEMP_WAV_SWEEP_INTERVAL_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                continue
+
+    async def _execute_job(self, job: _QueuedJob) -> object:
+        timeout_seconds = self._job_timeout_seconds(job)
+        try:
+            return await self._dispatch_job(job, timeout_seconds)
+        except InferenceTimeoutError:
+            await self._recover_worker(
+                f"{job.kind.upper()} timed out after {timeout_seconds:.1f}s; reloading model worker"
+            )
+            raise
+        except WorkerProcessError as exc:
+            recovered = await self._recover_worker(
+                f"Model worker crashed during {job.kind}; reloading once"
+            )
+            if recovered:
+                return await self._dispatch_job(job, timeout_seconds)
+            raise RuntimeError(f"Inference failed after worker recovery attempt: {exc}") from exc
+
+    async def _dispatch_job(self, job: _QueuedJob, timeout_seconds: float) -> object:
+        if self._request_queue is None or self._response_queue is None or self._process is None:
+            raise WorkerProcessError("MLX worker process is not started")
+        if not self._process.is_alive():
+            raise WorkerProcessError("MLX worker process exited unexpectedly")
+
+        payload = job.payload
+        if job.kind in {"ast", "translate"}:
+            payload = {
+                key: value
+                for key, value in job.payload.items()
+                if key not in {"priority", "utterance_id"}
+            }
+        request = {
+            "job_id": job.sequence,
+            "kind": job.kind,
+            "payload": payload,
+        }
+        await asyncio.to_thread(self._request_queue.put, request)
+        response = await self._wait_for_worker_response(job, timeout_seconds)
+
+        if response.get("type") == "result" and response.get("job_id") == job.sequence:
+            return response["result"]
+        if response.get("type") == "fatal" and response.get("job_id") == job.sequence:
+            await self._stop_worker_process(force=True)
+            raise WorkerProcessError(response.get("error", "Unknown worker error"))
+        raise WorkerProcessError(f"Unexpected worker response: {response!r}")
+
+    async def _wait_for_worker_response(
+        self,
+        job: _QueuedJob,
+        timeout_seconds: float,
+    ) -> dict:
+        if self._response_queue is None or self._process is None:
+            raise WorkerProcessError("MLX worker process is not started")
+
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            if not self._process.is_alive():
+                raise WorkerProcessError("MLX worker process exited unexpectedly")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                await self._stop_worker_process(force=True)
+                raise InferenceTimeoutError(
+                    f"{job.kind.upper()} timed out after {timeout_seconds:.1f}s"
+                )
+            try:
+                response = await asyncio.to_thread(
+                    self._response_queue.get,
+                    True,
+                    min(0.25, remaining),
+                )
+            except queue.Empty:
+                continue
+            if response.get("type") == "delta" and response.get("job_id") == job.sequence:
+                if job.on_delta is not None:
+                    job.on_delta(str(response.get("text") or ""))
+                continue
+            return response
+
+    async def _recover_worker(self, message: str) -> bool:
+        if self._closed.is_set():
+            return False
+        await self._emit_status(WorkerStatusEvent(state="recovering", message=message))
+        await self._stop_worker_process(force=True)
+        if MLX_WORKER_RECOVERY_BACKOFF_SECONDS:
+            await asyncio.sleep(MLX_WORKER_RECOVERY_BACKOFF_SECONDS)
+        try:
+            await self._start_worker_process()
+            return True
+        except Exception as exc:
+            await self._emit_status(
+                WorkerStatusEvent(state="failed", message=f"Model worker recovery failed: {exc}")
+            )
+            return False
+
+    async def _start_worker_process(self) -> None:
+        await self._emit_status(WorkerStatusEvent(state="starting", message="Loading Gemma model worker"))
+        request_queue: mp.Queue = self._mp_context.Queue()
+        response_queue: mp.Queue = self._mp_context.Queue()
+        process = self._mp_context.Process(
+            target=_worker_process_main,
+            args=(request_queue, response_queue, str(self._temp_wav_root)),
+            daemon=True,
+        )
+        process.start()
+        self._process = process
+        self._request_queue = request_queue
+        self._response_queue = response_queue
+        try:
+            response = await asyncio.to_thread(
+                response_queue.get,
+                True,
+                MLX_WORKER_START_TIMEOUT_SECONDS,
+            )
+        except queue.Empty as exc:
+            await self._stop_worker_process(force=True)
+            raise RuntimeError(
+                f"Timed out loading MLX worker after {MLX_WORKER_START_TIMEOUT_SECONDS:.1f}s"
+            ) from exc
+
+        if response.get("type") != "ready":
+            await self._stop_worker_process(force=True)
+            raise RuntimeError(response.get("error", "MLX worker failed to report ready"))
+        await self._emit_status(WorkerStatusEvent(state="ready", message="Model worker ready"))
+
+    async def _stop_worker_process(self, force: bool) -> None:
+        process = self._process
+        request_queue = self._request_queue
+        response_queue = self._response_queue
+        self._process = None
+        self._request_queue = None
+        self._response_queue = None
+
+        if process is None:
+            return
+
+        if request_queue is not None and not force:
+            try:
+                await asyncio.to_thread(request_queue.put, None)
+            except Exception:
+                pass
+
+        await asyncio.to_thread(process.join, 1.0)
+        if process.is_alive():
+            process.terminate()
+            await asyncio.to_thread(process.join, 2.0)
+        if process.is_alive():
+            process.kill()
+            await asyncio.to_thread(process.join, 2.0)
+
+        for ipc_queue in (request_queue, response_queue):
+            if ipc_queue is None:
+                continue
+            try:
+                ipc_queue.close()
+                ipc_queue.join_thread()
+            except Exception:
+                pass
+
+    async def _emit_status(self, event: WorkerStatusEvent) -> None:
+        self._status = event
+        if not self._status_listeners:
+            return
+        results = await asyncio.gather(
+            *(listener(event) for listener in list(self._status_listeners)),
+            return_exceptions=True,
+        )
+        for result in results:
+            if isinstance(result, Exception):
+                continue
+
+    def _job_timeout_seconds(self, job: _QueuedJob) -> float:
+        if job.kind == "maintenance":
+            return MAINTENANCE_TIMEOUT_SECONDS
+        if job.kind == "correct":
+            return POLISH_TIMEOUT_SECONDS
+        if job.kind == "polish":
+            return POLISH_TIMEOUT_SECONDS
+        if job.kind == "translate":
+            return TRANSLATE_TIMEOUT_SECONDS
+        if job.kind == "ast" and job.payload.get("priority") == "partial":
+            return PARTIAL_TIMEOUT_SECONDS
+        return FINAL_TIMEOUT_SECONDS
+
+
+def _worker_process_main(
+    request_queue: mp.Queue,
+    response_queue: mp.Queue,
+    temp_wav_root: str,
+) -> None:
+    try:
+        worker = MLXWorker(Path(temp_wav_root))
+    except Exception:
+        response_queue.put({"type": "fatal", "error": traceback.format_exc()})
+        return
+
+    response_queue.put({"type": "ready"})
+
+    while True:
+        try:
+            request = request_queue.get()
+        except (EOFError, KeyboardInterrupt):
+            return
+        if request is None:
+            return
+
+        job_id = request["job_id"]
+        try:
+            if request["kind"] == "ast":
+                payload = dict(request["payload"])
+
+                def emit(text: str, job_id: int = job_id) -> None:
+                    response_queue.put({"type": "delta", "job_id": job_id, "text": text})
+
+                result = worker.ast(**payload, on_text=emit)
+            elif request["kind"] == "maintenance":
+                result = worker.clear_caches()
+            elif request["kind"] == "polish":
+                result = worker.polish(**request["payload"])
+            elif request["kind"] == "correct":
+                result = worker.correct_asr_text(**request["payload"])
+            else:
+                result = worker.translate_text(**request["payload"])
+        except Exception:
+            response_queue.put(
+                {
+                    "type": "fatal",
+                    "job_id": job_id,
+                    "error": traceback.format_exc(),
+                }
+            )
+            return
+
+        response_queue.put({"type": "result", "job_id": job_id, "result": result})
+
+
+def sweep_stale_temp_wavs(temp_wav_root: Path, stale_after_seconds: float) -> int:
+    temp_wav_root.mkdir(parents=True, exist_ok=True)
+    now = time.time()
+    removed = 0
+    for wav_path in temp_wav_root.glob("*.wav"):
+        try:
+            age_seconds = now - wav_path.stat().st_mtime
+        except FileNotFoundError:
+            continue
+        if age_seconds < stale_after_seconds:
+            continue
+        _safe_unlink(wav_path)
+        removed += 1
+    return removed
+
+
+def _safe_unlink(path: Path) -> None:
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return

@@ -1,0 +1,110 @@
+INFO:     Started server process [21204]
+INFO:     Waiting for application startup.
+Fetching 9 files:   0%|          | 0/9 [00:00<?, ?it/s]Fetching 9 files: 100%|██████████| 9/9 [00:00<00:00, 110054.62it/s]
+/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/transformers/audio_utils.py:821: UserWarning: At least one mel filter has all zero values. The value for `num_mel_filters` (128) may be set too high. Or, the value for `num_frequency_bins` (257) may be set too low.
+  warnings.warn(
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://127.0.0.1:8765 (Press CTRL+C to quit)
+INFO:     127.0.0.1:55069 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:55081 - "WebSocket /?session=f04771da-4d32-4c81-9bea-b6c89e172bc8" [accepted]
+INFO:     connection open
+INFO:     127.0.0.1:55089 - "WebSocket /?session=f04771da-4d32-4c81-9bea-b6c89e172bc8" [accepted]
+INFO:     connection closed
+ERROR:    Exception in ASGI application
+Traceback (most recent call last):
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py", line 317, in asgi_send
+    await self.send(data)  # type: ignore[arg-type]
+    ^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 618, in send
+    await self.ensure_open()
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/websockets/legacy/protocol.py", line 916, in ensure_open
+    raise self.connection_closed_exc()
+websockets.exceptions.ConnectionClosedError: no close frame received or sent
+
+The above exception was the direct cause of the following exception:
+
+Traceback (most recent call last):
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/websockets.py", line 92, in send
+    await self._send(message)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 39, in sender
+    await send(message)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py", line 330, in asgi_send
+    raise ClientDisconnected from exc
+uvicorn.protocols.utils.ClientDisconnected
+
+During handling of the above exception, another exception occurred:
+
+Traceback (most recent call last):
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/uvicorn/protocols/websockets/websockets_impl.py", line 239, in run_asgi
+    result = await self.app(self.scope, self.asgi_receive, self.asgi_send)  # type: ignore[func-returns-value]
+             ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/uvicorn/middleware/proxy_headers.py", line 60, in __call__
+    return await self.app(scope, receive, send)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/fastapi/applications.py", line 1159, in __call__
+    await super().__call__(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/applications.py", line 96, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/middleware/errors.py", line 151, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/middleware/cors.py", line 79, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/middleware/exceptions.py", line 63, in __call__
+    await wrap_app_handling_exceptions(self.app, conn)(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/fastapi/middleware/asyncexitstack.py", line 18, in __call__
+    await self.app(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/routing.py", line 676, in __call__
+    await self.middleware_stack(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/routing.py", line 697, in app
+    await route.handle(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/routing.py", line 356, in handle
+    await self.app(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 160, in app
+    await wrap_app_handling_exceptions(app, session)(scope, receive, send)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 53, in wrapped_app
+    raise exc
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/_exception_handler.py", line 42, in wrapped_app
+    await app(scope, receive, sender)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 157, in app
+    await func(session)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/fastapi/routing.py", line 764, in app
+    await dependant.call(**solved_result.values)
+  File "/Users/ed/cursor-worker/retreater/app/backend/server.py", line 58, in websocket_root
+    await TranscriptionSession(
+    ...<5 lines>...
+    ).run()
+  File "/Users/ed/cursor-worker/retreater/app/backend/session.py", line 518, in run
+    await self.worker.add_status_listener(self._handle_worker_status)
+  File "/Users/ed/cursor-worker/retreater/app/backend/mlx_worker.py", line 489, in add_status_listener
+    await listener(self._status)
+  File "/Users/ed/cursor-worker/retreater/app/backend/session.py", line 1402, in _handle_worker_status
+    await self._send(
+    ...<4 lines>...
+    )
+  File "/Users/ed/cursor-worker/retreater/app/backend/session.py", line 1394, in _send
+    await self.websocket.send_json(payload)
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/websockets.py", line 182, in send_json
+    await self.send({"type": "websocket.send", "text": text})
+  File "/Users/ed/cursor-worker/retreater/app/backend/.venv/lib/python3.13/site-packages/starlette/websockets.py", line 95, in send
+    raise WebSocketDisconnect(code=1006)
+starlette.websockets.WebSocketDisconnect
+INFO:     127.0.0.1:55090 - "WebSocket /?session=f04771da-4d32-4c81-9bea-b6c89e172bc8" [accepted]
+INFO:     connection open
+INFO:     final_commit reason=silero_end utterance_id=1 audio_seconds=5.500
+INFO:     final_commit reason=silero_end utterance_id=2 audio_seconds=5.720
+INFO:     final_commit reason=silero_end utterance_id=3 audio_seconds=5.740
+INFO:     final_commit reason=silero_end utterance_id=4 audio_seconds=5.740
+INFO:     final_commit reason=silero_end utterance_id=5 audio_seconds=5.740
+INFO:     final_commit reason=silero_end utterance_id=6 audio_seconds=4.040
+INFO:     connection closed
+INFO:     Shutting down
+INFO:     connection closed
+INFO:     Waiting for application shutdown.
+INFO:     Application shutdown complete.
+INFO:     Finished server process [21204]
+/opt/homebrew/Cellar/python@3.13/3.13.13/Frameworks/Python.framework/Versions/3.13/lib/python3.13/multiprocessing/resource_tracker.py:400: UserWarning: resource_tracker: There appear to be 1 leaked semaphore objects to clean up at shutdown: {'/loky-21208-ah4syl4r'}
+  warnings.warn(

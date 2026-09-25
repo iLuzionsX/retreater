@@ -1,0 +1,67 @@
+{
+  "duration_seconds": 90.0,
+  "final_count": 15,
+  "error_count": 0,
+  "rss_bytes": {
+    "min": 416530432.0,
+    "median": 528482304.0,
+    "p95": 1312304332.7999997,
+    "max": 1431306240.0
+  },
+  "temp_file_count": {
+    "min": 0.0,
+    "median": 0.0,
+    "p95": 0.8499999999999996,
+    "max": 1.0
+  },
+  "archive_entry_count": {
+    "min": 250.0,
+    "median": 250.0,
+    "p95": 250.0,
+    "max": 250.0
+  },
+  "final_latency_seconds": {
+    "min": 4.811995750002097,
+    "median": 6.556995166989509,
+    "p95": 6.767898654288729,
+    "max": 6.794211333006388
+  },
+  "silence_to_final_seconds": {
+    "min": 0.5642480850219727,
+    "median": 0.9865598678588867,
+    "p95": 1.2915174722671507,
+    "max": 1.338036060333252
+  },
+  "commit_reason_counts": {
+    "silero_end": 15
+  },
+  "commit_reason_percentages": {
+    "silero_end": 100.0
+  },
+  "early_final_latency_seconds": {
+    "min": 4.811995750002097,
+    "median": 6.556995166989509,
+    "p95": 6.767898654288729,
+    "max": 6.794211333006388
+  },
+  "late_final_latency_seconds": {
+    "min": 4.811995750002097,
+    "median": 6.556995166989509,
+    "p95": 6.767898654288729,
+    "max": 6.794211333006388
+  },
+  "status_events": [
+    {
+      "elapsed_seconds": 1.0009670830040704,
+      "payload": {
+        "type": "status",
+        "state": "ready",
+        "message": "Parakeet ASR model ready: mlx-community/parakeet-tdt-0.6b-v3"
+      }
+    }
+  ],
+  "events": [],
+  "csv_path": "/Users/ed/cursor-worker/retreater/app/backend/scripts/mac-measure/soak_2026-09-25T00-38-34-0400.csv",
+  "backend_log_path": "/Users/ed/cursor-worker/retreater/app/backend/scripts/mac-measure/soak_2026-09-25T00-38-34-0400.backend.log",
+  "failures": []
+}
