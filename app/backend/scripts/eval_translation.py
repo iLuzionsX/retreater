@@ -12,20 +12,24 @@ from __future__ import annotations
 import argparse
 import json
 import statistics
+import sys
 import time
 import urllib.request
+import zipfile
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
 from prompts import (
-    CAPTION_SAMPLING,
     GEMMA4_CHAT_SAMPLING,
+    GREEDY_SAMPLING,
     SamplingConfig,
     build_translate_prompt,
     build_translate_prompt_baseline,
 )
 
-FLORES_ENG = "https://raw.githubusercontent.com/facebookresearch/flores/main/flores200/devtest/eng_Latn.devtest"
-FLORES_SPA = "https://raw.githubusercontent.com/facebookresearch/flores/main/flores200/devtest/spa_Latn.devtest"
+TATOEBA_ZIP = "https://object.pouta.csc.fi/OPUS-Tatoeba/v2023-04-12/moses/en-es.txt.zip"
+PAIR_SOURCE = "OPUS Tatoeba v2023-04-12 English-Spanish, sentences of at most 24 words"
 
 
 def _download(url: str, dest: Path) -> None:
@@ -36,15 +40,25 @@ def _download(url: str, dest: Path) -> None:
 
 
 def load_pairs(cache_dir: Path, limit: int) -> list[tuple[str, str]]:
-    eng_path = cache_dir / "eng_Latn.devtest"
-    spa_path = cache_dir / "spa_Latn.devtest"
-    _download(FLORES_ENG, eng_path)
-    _download(FLORES_SPA, spa_path)
-    english = [line.strip() for line in eng_path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    spanish = [line.strip() for line in spa_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    zip_path = cache_dir / "en-es.txt.zip"
+    _download(TATOEBA_ZIP, zip_path)
+    with zipfile.ZipFile(zip_path) as archive:
+        names = archive.namelist()
+        english_name = next(name for name in names if name.endswith(".en"))
+        spanish_name = next(name for name in names if name.endswith(".es"))
+        english = archive.read(english_name).decode("utf-8").splitlines()
+        spanish = archive.read(spanish_name).decode("utf-8").splitlines()
     if len(english) != len(spanish):
-        raise RuntimeError(f"FLORES line mismatch: {len(english)} English vs {len(spanish)} Spanish")
-    return list(zip(english, spanish, strict=True))[:limit]
+        raise RuntimeError(f"Tatoeba line mismatch: {len(english)} English vs {len(spanish)} Spanish")
+    pairs = [
+        (source.strip(), target.strip())
+        for source, target in zip(english, spanish, strict=True)
+        if source.strip() and target.strip() and len(source.split()) <= 24
+    ]
+    if len(pairs) < limit:
+        raise RuntimeError(f"Only {len(pairs)} Tatoeba pairs were usable")
+    stride = max(1, len(pairs) // limit)
+    return pairs[::stride][:limit]
 
 
 def _generate(llm: object, prompt: str, sampling: SamplingConfig, max_tokens: int) -> tuple[str, float]:
@@ -86,7 +100,7 @@ def main() -> None:
     parser.add_argument("--limit", type=int, default=12)
     parser.add_argument("--max-tokens", type=int, default=96)
     parser.add_argument("--threads", type=int, default=8)
-    parser.add_argument("--cache-dir", type=Path, default=Path("/tmp/flores200"))
+    parser.add_argument("--cache-dir", type=Path, default=Path("/tmp/tatoeba-en-es"))
     parser.add_argument("--output", type=Path, default=Path("/tmp/translation-eval.json"))
     args = parser.parse_args()
 
@@ -101,13 +115,15 @@ def main() -> None:
         chat_format=None,
     )
     conditions = {
-        "baseline_temp1": (build_translate_prompt_baseline, GEMMA4_CHAT_SAMPLING),
-        "improved_greedy": (build_translate_prompt, CAPTION_SAMPLING),
+        "baseline_prompt_temp1": (build_translate_prompt_baseline, GEMMA4_CHAT_SAMPLING),
+        "baseline_prompt_greedy": (build_translate_prompt_baseline, GREEDY_SAMPLING),
+        "improved_prompt_temp1": (build_translate_prompt, GEMMA4_CHAT_SAMPLING),
+        "improved_prompt_greedy": (build_translate_prompt, GREEDY_SAMPLING),
     }
     report: dict[str, object] = {
         "model": str(args.model),
         "checkpoint": "google/gemma-4-E4B-it Q8_0 via bartowski GGUF",
-        "pairs": "facebookresearch/flores flores200 devtest eng_Latn -> spa_Latn",
+        "pairs": PAIR_SOURCE,
         "limit": len(pairs),
         "conditions": {},
     }

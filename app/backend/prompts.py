@@ -16,15 +16,15 @@ class SamplingConfig:
     top_k: int
 
 
-# mlx-vlm's generate() default. Greedy captions do not flicker between
-# equally likely wordings, which keeps partials stable and early-commit honest.
+# mlx-vlm's generate() default. Faster on CPU, but lower BLEU on Gemma 4 E4B-it.
 GREEDY_SAMPLING = SamplingConfig(temperature=0.0, top_p=1.0, top_k=0)
 
-# Google's published Gemma 4 chat sampler. Kept as the measured baseline.
+# Google's published Gemma 4 chat sampler. The CPU Q8_0 eval preferred this
+# over greedy for the live translation prompt (higher BLEU and chrF).
 GEMMA4_CHAT_SAMPLING = SamplingConfig(temperature=1.0, top_p=0.95, top_k=64)
 
-# Live caption tasks. The eval harness compares this against GEMMA4_CHAT_SAMPLING.
-CAPTION_SAMPLING = GREEDY_SAMPLING
+# Live caption tasks use the sampler that won the off-Mac quality comparison.
+CAPTION_SAMPLING = GEMMA4_CHAT_SAMPLING
 
 
 def _clean(text: str) -> str:
