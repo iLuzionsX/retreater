@@ -16,6 +16,16 @@ import numpy as np
 import soundfile as sf
 from dotenv import load_dotenv
 
+from prompts import (
+    CAPTION_SAMPLING,
+    SamplingConfig,
+    build_asr_correction_prompt,
+    build_ast_prompt,
+    build_polish_prompt,
+    build_translate_prompt,
+    parse_ast_output,
+)
+
 load_dotenv()
 
 MODEL_PATH = os.getenv("MODEL_PATH", "mlx-community/gemma-4-e4b-it-8bit")
@@ -38,45 +48,6 @@ MLX_WORKER_RECOVERY_BACKOFF_SECONDS = max(
     0.0, float(os.getenv("MLX_WORKER_RECOVERY_BACKOFF_SECONDS", "2"))
 )
 
-AST_PROMPT = (
-    "Transcribe the following speech segment in {src}, "
-    "then translate it into {tgt}. When formatting the answer, "
-    "first output the transcription in {src}, then one newline, "
-    "then output the string '{tgt}: ', then the translation in {tgt}."
-)
-
-POLISH_PROMPT = (
-    "You will receive a rough transcription. Remove filler words "
-    "(um, uh, er, you know, like), fix punctuation, fix capitalization, "
-    "and keep the exact meaning and wording. Return ONLY the cleaned text "
-    "with no preamble.\n\nTranscription: {text}"
-)
-
-TRANSLATE_PROMPT = (
-    "Translate the following text from {src} to {tgt}. Return ONLY the translation "
-    "with no preamble.\n\nText: {text}"
-)
-
-CONTEXTUAL_TRANSLATE_PROMPT = (
-    "Translate the following text from {src} to {tgt}. Return ONLY the translation "
-    "with no preamble.\n\n"
-    "Use these recent bilingual reference pairs only to preserve names, recurring "
-    "church terms, scripture wording, tone, and phrase choices when they clearly "
-    "apply. Do not copy a reference pair unless it matches the text being translated.\n\n"
-    "{context}\n\nText: {text}"
-)
-
-ASR_CORRECTION_PROMPT = (
-    "You will receive a finalized ASR transcript in {src}. Correct likely speech "
-    "recognition errors, punctuation, capitalization, and spacing. Preserve the "
-    "speaker's wording and meaning. Do not summarize, translate, add commentary, "
-    "or censor. Never translate the transcript; if the transcript is actually in "
-    "another language, keep that language and only fix recognition mistakes. "
-    "Use the optional context only when it plausibly matches what was "
-    "said. Return ONLY the corrected {src} transcript.\n\n{context}Transcript: {text}"
-)
-
-
 class MLXWorker:
     def __init__(self, temp_wav_root: Path | None = None) -> None:
         from mlx_vlm import load
@@ -86,6 +57,8 @@ class MLXWorker:
         sweep_stale_temp_wavs(self._temp_wav_root, TEMP_WAV_STALE_SECONDS)
         self.model, self.processor = load(MODEL_PATH)
         self.config = self.model.config
+        self._prompt_cache_state = None
+        self._wav_path = self._temp_wav_root / "ast-live.wav"
         self._warmup()
 
     def _warmup(self) -> None:
@@ -102,40 +75,22 @@ class MLXWorker:
         code_switching_enabled: bool = False,
         max_tokens: int = 256,
     ) -> tuple[str, str]:
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
         audio_f32_16k = np.asarray(audio_f32_16k, dtype=np.float32).reshape(-1)
         if audio_f32_16k.shape[0] > 25 * 16_000:
             audio_f32_16k = audio_f32_16k[: 25 * 16_000]
 
-        fd, wav_path_raw = tempfile.mkstemp(
-            suffix=".wav",
-            prefix="ast-",
-            dir=self._temp_wav_root,
-        )
-        os.close(fd)
-        wav_path = Path(wav_path_raw)
-
+        wav_path = self._wav_path
         try:
             sf.write(wav_path, audio_f32_16k, 16_000, subtype="FLOAT")
-            prompt_text = AST_PROMPT.format(src=src, tgt=tgt)
-            if custom_vocab:
-                prompt_text = (
-                    f"The speaker frequently uses these terms: {', '.join(custom_vocab)}. "
-                    "Prefer them when acoustically ambiguous.\n\n"
-                    + prompt_text
-                )
-            if code_switching_enabled:
-                prompt_text = (
-                    f"Speaker may code-switch between {src} and {tgt}; "
-                    f"transcribe in the spoken language, translate to {tgt}.\n\n"
-                    + prompt_text
-                )
-            if prior_context:
-                ctx = "\n".join(f"Previous: {o} / {t}" for o, t in prior_context[-2:])
-                prompt_text = ctx + "\n\n" + prompt_text
-
+            prompt_text = build_ast_prompt(
+                src,
+                tgt,
+                prior_context=prior_context,
+                custom_vocab=custom_vocab,
+                code_switching_enabled=code_switching_enabled,
+            )
             # mlx-vlm expands num_audios before the prompt text; do not hand-roll templates.
             formatted = apply_chat_template(
                 self.processor,
@@ -143,47 +98,26 @@ class MLXWorker:
                 prompt_text,
                 num_audios=1,
             )
-            out = _generation_text(
-                generate(
-                    self.model,
-                    self.processor,
-                    formatted,
-                    audio=[str(wav_path)],
-                    max_tokens=max_tokens,
-                    temperature=1.0,
-                    top_p=0.95,
-                    top_k=64,
-                    verbose=False,
-                )
+            out = self._generate(
+                formatted,
+                audio=[str(wav_path)],
+                max_tokens=max_tokens,
+                sampling=CAPTION_SAMPLING,
             )
-            marker = f"\n{tgt}: "
-            if marker in out:
-                original, translation = out.split(marker, 1)
-            else:
-                original, translation = out, ""
-            return original.strip(), translation.strip()
+            return parse_ast_output(out, tgt)
         finally:
             _safe_unlink(wav_path)
 
     def polish(self, text: str, max_tokens: int = 256) -> str:
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
-        prompt = POLISH_PROMPT.format(text=text)
+        prompt = build_polish_prompt(text)
         formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
-        out = _generation_text(
-            generate(
-                self.model,
-                self.processor,
-                formatted,
-                max_tokens=max_tokens,
-                temperature=1.0,
-                top_p=0.95,
-                top_k=64,
-                verbose=False,
-            )
-        )
-        return out.strip()
+        return self._generate(
+            formatted,
+            max_tokens=max_tokens,
+            sampling=CAPTION_SAMPLING,
+        ).strip()
 
     def translate_text(
         self,
@@ -193,33 +127,20 @@ class MLXWorker:
         max_tokens: int = 256,
         bilingual_context: list[tuple[str, str]] | None = None,
     ) -> str:
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
-        context = _format_bilingual_context(bilingual_context or [])
-        if context:
-            prompt = CONTEXTUAL_TRANSLATE_PROMPT.format(
-                text=text,
-                src=src,
-                tgt=tgt,
-                context=context,
-            )
-        else:
-            prompt = TRANSLATE_PROMPT.format(text=text, src=src, tgt=tgt)
-        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
-        out = _generation_text(
-            generate(
-                self.model,
-                self.processor,
-                formatted,
-                max_tokens=max_tokens,
-                temperature=1.0,
-                top_p=0.95,
-                top_k=64,
-                verbose=False,
-            )
+        prompt = build_translate_prompt(
+            text,
+            src,
+            tgt,
+            bilingual_context=bilingual_context,
         )
-        return out.strip()
+        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
+        return self._generate(
+            formatted,
+            max_tokens=max_tokens,
+            sampling=CAPTION_SAMPLING,
+        ).strip()
 
     def correct_asr_text(
         self,
@@ -231,55 +152,27 @@ class MLXWorker:
         code_switching_enabled: bool = False,
         max_tokens: int = 192,
     ) -> str:
-        from mlx_vlm import generate
         from mlx_vlm.prompt_utils import apply_chat_template
 
-        context_parts: list[str] = []
-        if custom_vocab:
-            context_parts.append(
-                "Known names, terms, or phrases: "
-                + ", ".join(item.strip() for item in custom_vocab if item.strip())
-                + "."
-            )
-        if prior_context:
-            recent = "\n".join(
-                f"- {original}" for original, _ in prior_context[-3:] if original.strip()
-            )
-            if recent:
-                context_parts.append("Recent transcript context:\n" + recent)
-        learned = _format_learned_corrections(learned_corrections or [])
-        if learned:
-            context_parts.append(
-                "Previously corrected ASR mistakes. If a similar mistake appears, "
-                "prefer the corrected wording when it plausibly matches the audio:\n"
-                + learned
-            )
-        if code_switching_enabled:
-            context_parts.append(
-                f"The speaker may code-switch while primarily speaking {src}."
-            )
-        context = "\n\n".join(context_parts)
-        if context:
-            context += "\n\n"
-        prompt = ASR_CORRECTION_PROMPT.format(text=text, src=src, context=context)
-        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
-        out = _generation_text(
-            generate(
-                self.model,
-                self.processor,
-                formatted,
-                max_tokens=max_tokens,
-                temperature=0.2,
-                top_p=0.9,
-                top_k=32,
-                verbose=False,
-            )
+        prompt = build_asr_correction_prompt(
+            text,
+            src,
+            custom_vocab=custom_vocab,
+            prior_context=prior_context,
+            learned_corrections=learned_corrections,
+            code_switching_enabled=code_switching_enabled,
         )
-        return out.strip()
+        formatted = apply_chat_template(self.processor, self.config, prompt, num_audios=0)
+        return self._generate(
+            formatted,
+            max_tokens=max_tokens,
+            sampling=CAPTION_SAMPLING,
+        ).strip()
 
     def clear_caches(self) -> None:
         import gc
 
+        self._prompt_cache_state = None
         gc.collect()
         try:
             import mlx.core as mx
@@ -287,6 +180,33 @@ class MLXWorker:
             mx.metal.clear_cache()
         except Exception:
             return
+
+    def _generate(
+        self,
+        formatted: str,
+        *,
+        max_tokens: int,
+        sampling: SamplingConfig,
+        audio: list[str] | None = None,
+    ) -> str:
+        from mlx_vlm import generate
+        from mlx_vlm.generate import PromptCacheState
+
+        if self._prompt_cache_state is None:
+            self._prompt_cache_state = PromptCacheState()
+        result = generate(
+            self.model,
+            self.processor,
+            formatted,
+            audio=audio,
+            max_tokens=max_tokens,
+            temperature=sampling.temperature,
+            top_p=sampling.top_p,
+            top_k=sampling.top_k,
+            verbose=False,
+            prompt_cache_state=self._prompt_cache_state,
+        )
+        return _generation_text(result)
 
 
 def _generation_text(result: object) -> str:
@@ -304,28 +224,6 @@ def _translation_max_tokens(text: str, priority: Literal["partial", "final"]) ->
     minimum = 32 if priority == "partial" else 48
     maximum = 96 if priority == "partial" else 160
     return min(maximum, max(minimum, word_count * 3 + buffer))
-
-
-def _format_bilingual_context(pairs: list[tuple[str, str]]) -> str:
-    lines: list[str] = []
-    for original, translation in pairs[-5:]:
-        original = " ".join(original.strip().split())
-        translation = " ".join(translation.strip().split())
-        if not original or not translation:
-            continue
-        lines.append(f"- Source: {original}\n  Translation: {translation}")
-    return "\n".join(lines)
-
-
-def _format_learned_corrections(pairs: list[tuple[str, str]]) -> str:
-    lines: list[str] = []
-    for heard, corrected in pairs[-8:]:
-        heard = " ".join(heard.strip().split())
-        corrected = " ".join(corrected.strip().split())
-        if not heard or not corrected or heard == corrected:
-            continue
-        lines.append(f"- Heard: {heard}\n  Corrected: {corrected}")
-    return "\n".join(lines)
 
 
 class InferenceTimeoutError(RuntimeError):

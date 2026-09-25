@@ -817,8 +817,14 @@ class TranscriptionSession:
             )
             previous_original = runtime.latest_partial_original
             merged_original = _merge_partial_text(runtime.latest_partial_original, original)
+            ast_translation_covers = bool(translation.strip()) and (
+                _normalize_learned_text(merged_original) == _normalize_learned_text(original)
+            )
             if self._should_translate_final(merged_original):
-                merged_translation = runtime.latest_partial_translation or translation
+                if ast_translation_covers:
+                    merged_translation = translation
+                else:
+                    merged_translation = runtime.latest_partial_translation or translation
             else:
                 merged_translation = merged_original
             if (
@@ -828,7 +834,11 @@ class TranscriptionSession:
                 return
             runtime.latest_partial_original = merged_original
             runtime.latest_partial_translation = merged_translation
-            if merged_original != previous_original and self._should_translate_final(merged_original):
+            if (
+                merged_original != previous_original
+                and self._should_translate_final(merged_original)
+                and not ast_translation_covers
+            ):
                 task = asyncio.create_task(
                     self._run_partial_translation_update(utterance_id, merged_original),
                     name=f"partial-translation-{utterance_id}",
@@ -1130,6 +1140,7 @@ class TranscriptionSession:
                 self.state.config.target_lang,
                 priority="partial",
                 utterance_id=utterance_id,
+                bilingual_context=self._bilingual_context_for_translation(),
             )
         except asyncio.CancelledError:
             raise
@@ -1458,7 +1469,9 @@ class TranscriptionSession:
 
     def _max_tokens_for_ast(self, priority: str, audio: np.ndarray) -> int:
         if priority == "partial":
-            return 32
+            # 1.2s partials need room for the source line and the translation line.
+            # Cutting this at 32 dropped the translation and forced a second LLM call.
+            return 64
         duration_seconds = audio.shape[0] / 16_000
         if duration_seconds <= 8:
             return 80
