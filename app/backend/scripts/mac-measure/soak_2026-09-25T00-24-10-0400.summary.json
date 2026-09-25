@@ -1,0 +1,67 @@
+{
+  "duration_seconds": 300.0,
+  "final_count": 49,
+  "error_count": 0,
+  "rss_bytes": {
+    "min": 1346125824.0,
+    "median": 1352368128.0,
+    "p95": 2290819072.0,
+    "max": 2291499008.0
+  },
+  "temp_file_count": {
+    "min": 0.0,
+    "median": 1.0,
+    "p95": 1.0,
+    "max": 1.0
+  },
+  "archive_entry_count": {
+    "min": 247.0,
+    "median": 247.0,
+    "p95": 247.0,
+    "max": 247.0
+  },
+  "final_latency_seconds": {
+    "min": 7.033904333016835,
+    "median": 9.059063041000627,
+    "p95": 9.9200732996047,
+    "max": 10.50554720798391
+  },
+  "silence_to_final_seconds": {
+    "min": 1.4811291694641113,
+    "median": 3.4848787784576416,
+    "p95": 4.248003053665159,
+    "max": 4.901137828826904
+  },
+  "commit_reason_counts": {
+    "silero_end": 49
+  },
+  "commit_reason_percentages": {
+    "silero_end": 100.0
+  },
+  "early_final_latency_seconds": {
+    "min": 7.033904333016835,
+    "median": 9.069309103491833,
+    "p95": 9.930317876655318,
+    "max": 10.50554720798391
+  },
+  "late_final_latency_seconds": {
+    "min": 7.033904333016835,
+    "median": 9.059063041000627,
+    "p95": 9.9200732996047,
+    "max": 10.50554720798391
+  },
+  "status_events": [
+    {
+      "elapsed_seconds": 0.8826774170156568,
+      "payload": {
+        "type": "status",
+        "state": "ready",
+        "message": "Model worker ready"
+      }
+    }
+  ],
+  "events": [],
+  "csv_path": "/Users/ed/cursor-worker/retreater/app/backend/scripts/mac-measure/soak_2026-09-25T00-24-10-0400.csv",
+  "backend_log_path": "/Users/ed/cursor-worker/retreater/app/backend/scripts/mac-measure/soak_2026-09-25T00-24-10-0400.backend.log",
+  "failures": []
+}
