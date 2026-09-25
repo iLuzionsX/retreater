@@ -67,7 +67,9 @@ PLIST
 
 "$ROOT/script/package_engine.sh" "$BUNDLE"
 
-/usr/bin/open -n "$BUNDLE"
+if [[ "${SKIP_OPEN:-}" != "1" ]]; then
+  /usr/bin/open -n "$BUNDLE"
+fi
 
 if [[ "$verify" == true ]]; then
   sleep 2
