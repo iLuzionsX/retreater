@@ -192,6 +192,7 @@ final class SessionController: ObservableObject {
         var live = config
         live.version = 2
         live.apply_target = applyTarget
+        live.custom_vocab = Self.mergeGlossary(live.custom_vocab)
         live.input_device_id = selectedDeviceID.nilIfEmpty
         live.input_device_label = selectedDeviceLabel
         engine.sendConfig(live)
@@ -295,6 +296,19 @@ final class SessionController: ObservableObject {
         if let data = try? JSONEncoder().encode(config) {
             UserDefaults.standard.set(data, forKey: "LiveTR3.clientConfig")
         }
+    }
+
+    private static func mergeGlossary(_ vocab: [String]) -> [String] {
+        let stored = UserDefaults.standard.string(forKey: "LiveTR3.glossary") ?? ""
+        let extra = stored
+            .split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
+        var merged = vocab
+        for term in extra where !merged.contains(term) {
+            merged.append(term)
+        }
+        return merged
     }
 
     private static func loadConfig() -> ClientConfig {

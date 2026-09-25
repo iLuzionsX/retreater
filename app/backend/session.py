@@ -17,6 +17,7 @@ from uuid import uuid4
 import numpy as np
 from mlx_worker import InferenceTimeoutError, MLXWorkerService, WorkerStatusEvent
 from parakeet_worker import ASRResult, ParakeetASRService
+from prompts import parse_ast_output
 from protocol import (
     ConfigMessage,
     ErrorMessage,
@@ -785,12 +786,13 @@ class TranscriptionSession:
                 audio_f32_16k=audio,
                 src=self.state.config.source_lang,
                 tgt=self.state.config.target_lang,
-                prior_context=self.state.prior_context[-2:]
-                if DEFAULT_PRIOR_CONTEXT_ENABLED
-                else [],
+                prior_context=self.state.prior_context[-2:] if priority == "final" else [],
                 custom_vocab=[] if priority == "partial" else self.state.config.custom_vocab,
                 code_switching_enabled=self.state.config.code_switching_enabled,
                 max_tokens=self._max_tokens_for_ast(priority, audio),
+                on_delta=lambda text, utterance_id=utterance_id, priority=priority: (
+                    self._note_streamed_ast(priority, utterance_id, text)
+                ),
             )
         except asyncio.CancelledError:
             raise
@@ -886,6 +888,39 @@ class TranscriptionSession:
             self._jobs.add(task)
             task.add_done_callback(self._jobs.discard)
         await self._maybe_run_maintenance()
+
+    def _note_streamed_ast(self, priority: str, utterance_id: int, text: str) -> None:
+        if utterance_id in self._finalized or utterance_id in self._finalizing:
+            return
+        original, translation = parse_ast_output(text, self.state.config.target_lang)
+        original = original.strip()
+        translation = translation.strip()
+        if not original and not translation:
+            return
+        runtime = self._utterance_runtime.setdefault(
+            utterance_id,
+            UtteranceRuntime(partials=deque(maxlen=self._stability_window())),
+        )
+        if (
+            original == runtime.latest_partial_original
+            and translation == runtime.latest_partial_translation
+        ):
+            return
+        runtime.latest_partial_original = original
+        runtime.latest_partial_translation = translation
+        task = asyncio.create_task(
+            self._send_and_broadcast(
+                TranscriptMessage(
+                    type="partial",
+                    utterance_id=utterance_id,
+                    original=original,
+                    translation=translation,
+                ).model_dump(exclude_none=True)
+            ),
+            name=f"stream-{priority}-{utterance_id}",
+        )
+        self._jobs.add(task)
+        task.add_done_callback(self._jobs.discard)
 
     def _should_use_parakeet_asr(self) -> bool:
         return self.transcription_engine == "parakeet"

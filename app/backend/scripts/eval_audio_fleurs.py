@@ -135,7 +135,7 @@ def main() -> None:
     bleu = float(sacrebleu.corpus_bleu(hypotheses, [references]).score)
     chrf = float(sacrebleu.corpus_chrf(hypotheses, [references]).score)
     summary = {
-        "set": "google/fleurs test, en_us audio with es_419 text, matched on sentence id",
+        "set": "google/fleurs test, en_us audio with es_419 text, matched on id",
         "limit": args.limit,
         "bleu": bleu,
         "chrf": chrf,

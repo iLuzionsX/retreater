@@ -74,6 +74,7 @@ class MLXWorker:
         custom_vocab: list[str] | None = None,
         code_switching_enabled: bool = False,
         max_tokens: int = 256,
+        on_text: Callable[[str], None] | None = None,
     ) -> tuple[str, str]:
         from mlx_vlm.prompt_utils import apply_chat_template
 
@@ -103,6 +104,7 @@ class MLXWorker:
                 audio=[str(wav_path)],
                 max_tokens=max_tokens,
                 sampling=CAPTION_SAMPLING,
+                on_text=on_text,
             )
             return parse_ast_output(out, tgt)
         finally:
@@ -188,25 +190,37 @@ class MLXWorker:
         max_tokens: int,
         sampling: SamplingConfig,
         audio: list[str] | None = None,
+        on_text: Callable[[str], None] | None = None,
     ) -> str:
-        from mlx_vlm import generate
         from mlx_vlm.generate import PromptCacheState
 
-        if self._prompt_cache_state is None:
-            self._prompt_cache_state = PromptCacheState()
-        result = generate(
-            self.model,
-            self.processor,
-            formatted,
-            audio=audio,
-            max_tokens=max_tokens,
-            temperature=sampling.temperature,
-            top_p=sampling.top_p,
-            top_k=sampling.top_k,
-            verbose=False,
-            prompt_cache_state=self._prompt_cache_state,
-        )
-        return _generation_text(result)
+        # A reused KV cache keys on the text prefix. The AST prompt text is stable, so
+        # the next clip would keep the previous utterance's audio and repeat it.
+        self._prompt_cache_state = PromptCacheState()
+        sampling_kwargs = {
+            "audio": audio,
+            "max_tokens": max_tokens,
+            "temperature": sampling.temperature,
+            "top_p": sampling.top_p,
+            "top_k": sampling.top_k,
+            "verbose": False,
+            "prompt_cache_state": self._prompt_cache_state,
+        }
+        if on_text is None:
+            from mlx_vlm import generate
+
+            return _generation_text(generate(self.model, self.processor, formatted, **sampling_kwargs))
+
+        from mlx_vlm import stream_generate
+
+        full = ""
+        for response in stream_generate(self.model, self.processor, formatted, **sampling_kwargs):
+            piece = response.text or ""
+            if not piece or full.endswith(piece):
+                continue
+            full += piece
+            on_text(full)
+        return full
 
 
 def _generation_text(result: object) -> str:
@@ -247,6 +261,7 @@ class _QueuedJob:
     kind: Literal["ast", "polish", "translate", "correct", "maintenance"] = field(compare=False)
     future: asyncio.Future = field(compare=False)
     payload: dict = field(compare=False)
+    on_delta: Callable[[str], None] | None = field(compare=False, default=None)
 
 
 class MLXWorkerService:
@@ -324,6 +339,7 @@ class MLXWorkerService:
         custom_vocab: list[str],
         code_switching_enabled: bool,
         max_tokens: int,
+        on_delta: Callable[[str], None] | None = None,
     ) -> tuple[str, str] | None:
         loop = asyncio.get_running_loop()
         future: asyncio.Future = loop.create_future()
@@ -343,6 +359,7 @@ class MLXWorkerService:
                 "code_switching_enabled": code_switching_enabled,
                 "max_tokens": max_tokens,
             },
+            on_delta=on_delta,
         )
         if utterance_id is not None:
             previous = self._queued_partial_jobs.get(utterance_id)
@@ -603,13 +620,18 @@ class MLXWorkerService:
                     f"{job.kind.upper()} timed out after {timeout_seconds:.1f}s"
                 )
             try:
-                return await asyncio.to_thread(
+                response = await asyncio.to_thread(
                     self._response_queue.get,
                     True,
                     min(0.25, remaining),
                 )
             except queue.Empty:
                 continue
+            if response.get("type") == "delta" and response.get("job_id") == job.sequence:
+                if job.on_delta is not None:
+                    job.on_delta(str(response.get("text") or ""))
+                continue
+            return response
 
     async def _recover_worker(self, message: str) -> bool:
         if self._closed.is_set():
@@ -741,7 +763,12 @@ def _worker_process_main(
         job_id = request["job_id"]
         try:
             if request["kind"] == "ast":
-                result = worker.ast(**request["payload"])
+                payload = dict(request["payload"])
+
+                def emit(text: str, job_id: int = job_id) -> None:
+                    response_queue.put({"type": "delta", "job_id": job_id, "text": text})
+
+                result = worker.ast(**payload, on_text=emit)
             elif request["kind"] == "maintenance":
                 result = worker.clear_caches()
             elif request["kind"] == "polish":
