@@ -15,7 +15,6 @@ from typing import Awaitable, Callable, Literal
 import numpy as np
 import soundfile as sf
 from dotenv import load_dotenv
-from mlx.core import bfloat16
 
 from mlx_worker import TEMP_WAV_ROOT, _safe_unlink, sweep_stale_temp_wavs
 
@@ -73,6 +72,8 @@ class ParakeetASR:
         wav_path = Path(wav_path_raw)
         try:
             sf.write(wav_path, audio_f32_16k, 16_000, subtype="PCM_16")
+            from mlx.core import bfloat16
+
             first = self.model.transcribe(
                 wav_path,
                 dtype=bfloat16,
